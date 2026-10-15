@@ -88,6 +88,8 @@ forge build
 FOUNDRY_FUZZ_SEED=0xafedbd0c51c871146ac46750bcde0fa523713d34be6fab383f0b0d2bb53bc97f forge test -vv
 ```
 
+Three suites run offline with no RPC and no environment variables. `test/SUNTokenSmoke.t.sol` holds one short scenario per numbered check in the launch brief (supply and decimals, deployer holds everything and the factory splits 10% / 90%, a taxed buy out of the PoolManager, an untaxed sell into it, a free wallet transfer, a balanced pool round trip, immutable rate and recipient, no owner or admin surface) plus the revert paths for insufficient balance, missing allowance and a zero receiver. `test/SUNToken.t.sol` adds events, rounding, allowance edge cases and two fuzz conservation checks. `test/UniswapV4.t.sol` runs the real PoolManager in both currency orderings.
+
 Every Solidity import resolves to a delivered file. `lib/v4-core/` contains only the upstream PoolManager import graph needed for offline tests, pinned to commit `46c6834698c48bc4a463a86d8420f4eb1d7f3b75`. Its original licensing is retained. `lib/solmate/` contains its test-only Owned dependency. These contracts are **not** production launch contracts; the manifest lists only SUNToken and an empty application-contract array. There are no submodules. Foundry outputs and cache live under `test/scratch/`, which is excluded from delivery by the assignment.
 
 The integration suite builds the real upstream PoolManager at the specified address and exercises single-sided seeding, a buy, a sell and liquidity withdrawal in **both currency orderings**. A simple test-only IMD implementation supplies test balances. This tests v4 accounting, not the live chain or every external router. Its settlement approach follows [Uniswap’s PoolManager source](https://github.com/Uniswap/v4-core/blob/46c6834698c48bc4a463a86d8420f4eb1d7f3b75/src/PoolManager.sol) and [v4 flash accounting guidance](https://developers.uniswap.org/docs/protocols/v4/guides/flash-accounting).
@@ -98,7 +100,7 @@ Actual results are in `artifacts/validation.md` and `artifacts/browser-validatio
 
 - Production static export and strict JavaScript typecheck passed.
 - Six JavaScript model/security-boundary tests passed.
-- Fifteen Foundry tests passed with the requested seed, including two 1,000-case fuzz tests and 40-transfer stateful conservation sequences per fuzz case.
+- Twenty-seven Foundry tests passed with the requested seed on solc 0.8.26 (`forge build`, `forge test`, `forge fmt --check`), including two 1,000-case fuzz tests and 40-transfer stateful conservation sequences per fuzz case, and the twelve smoke tests in `test/SUNTokenSmoke.t.sol`.
 - Home and 404 pages passed overflow/image checks at 320, 375, 390, 768, 1440 and 1920px. Chromium interaction tests passed for the range slider, chart drag, tooltips, menu, buying guide, copying, PNG downloads, sharing, and live-data success/missing/malformed/retry/refresh behavior.
 - Four axe-core page/width scans reported zero WCAG A/AA violations. This is not a claim of full accessibility conformance.
 - The pinned taste@1 design probe passed all 16 checks. All six Better Interface domains were reviewed.
