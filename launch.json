@@ -1,0 +1,24 @@
+{
+  "kind": "custom_token",
+  "token": {
+    "contract": "SUNToken",
+    "name": "Sunflower Garden",
+    "symbol": "SUN",
+    "decimals": 18,
+    "constructorArgs": [],
+    "totalSupply": "1000000000000000000000000000"
+  },
+  "contracts": [],
+  "pool": {
+    "pairedCurrency": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "125270724187523965593206900"
+  },
+  "economics": {
+    "poolBps": 9000,
+    "initialMarketCapWei": "2500000000000000000000",
+    "remainderTo": "0x000000000000000000000000000000000000dead"
+  },
+  "notes": "SUNToken mints its entire fixed supply to its deployer once. The external launch factory handles the 90% pool and 10% swarm distribution. Only outgoing PoolManager transfers incur the immutable 0.5% creator tax; transfers into PoolManager and between ordinary wallets are untaxed. No treasury tax, admin, owner, mint, burn, proxy, governance or application contracts. The fixed pool fee is 1.25%. initialPrice is provenance; the launch derives the opening price from the economics and deployed currency order."
+}

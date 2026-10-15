@@ -1,0 +1,1 @@
+Uniswap v4-core, commit 46c6834698c48bc4a463a86d8420f4eb1d7f3b75. Only the transitive Solidity imports of PoolManager.sol are included for offline integration tests. Original source and license headers are unchanged. Upstream: https://github.com/Uniswap/v4-core/tree/46c6834698c48bc4a463a86d8420f4eb1d7f3b75

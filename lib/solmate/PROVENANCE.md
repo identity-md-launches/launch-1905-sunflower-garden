@@ -1,0 +1,1 @@
+Solmate Owned.sol is a transitive dependency of the vendored Uniswap v4 PoolManager used only by tests. Retrieved from https://github.com/transmissions11/solmate/blob/main/src/auth/Owned.sol on 2026-10-16; the exact committed source is the build input. The original SPDX header and upstream LICENSE are retained. SUNToken does not inherit Owned or import this library.
