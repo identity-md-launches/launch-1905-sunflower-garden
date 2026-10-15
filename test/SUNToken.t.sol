@@ -55,7 +55,6 @@ contract SUNTokenTest {
         require(token.balanceOf(CREATOR) == 1 ether, "creator credit");
     }
 
-    /// forge-config: default.fuzz.runs = 1000
     function testFuzz_BuySellAndWalletConservation(uint256 raw) public {
         uint256 amount = raw % (SUPPLY + 1);
         token.transfer(POOL, amount);
@@ -160,31 +159,44 @@ contract SUNTokenTest {
 
     function test_NoAdminMintBurnUpgradeOrFeeMutation() public {
         token.transfer(ALICE, 10 ether);
-        string[15] memory signatures = [
-            "owner()",
-            "mint(address,uint256)",
-            "mint(uint256)",
-            "burn(uint256)",
-            "burnFrom(address,uint256)",
-            "transferOwnership(address)",
-            "setFee(uint256)",
-            "setTaxRate(uint256)",
-            "setCreatorWallet(address)",
-            "setFeeRecipient(address)",
-            "pause()",
-            "blacklist(address)",
-            "seize(address)",
-            "upgradeTo(address)",
-            "initialize(address)"
+        // Use valid ABI arguments and plausible values. Passing an address as a fee or boolean
+        // could make an existing privileged setter revert on validation and hide the privilege.
+        bytes[24] memory calls = [
+            abi.encodeWithSignature("owner()"),
+            abi.encodeWithSignature("mint(address,uint256)", ALICE, 1),
+            abi.encodeWithSignature("mint(uint256)", 1),
+            abi.encodeWithSignature("mint()"),
+            abi.encodeWithSignature("burn(uint256)", 1),
+            abi.encodeWithSignature("burnFrom(address,uint256)", ALICE, 1),
+            abi.encodeWithSignature("transferOwnership(address)", BOB),
+            abi.encodeWithSignature("renounceOwnership()"),
+            abi.encodeWithSignature("setFee(uint256)", 0),
+            abi.encodeWithSignature("setTaxRate(uint256)", 0),
+            abi.encodeWithSignature("setCreatorTaxBps(uint256)", 0),
+            abi.encodeWithSignature("setFeeBps(uint256)", 0),
+            abi.encodeWithSignature("setCreatorWallet(address)", BOB),
+            abi.encodeWithSignature("setFeeRecipient(address)", BOB),
+            abi.encodeWithSignature("setPoolManager(address)", BOB),
+            abi.encodeWithSignature("pause()"),
+            abi.encodeWithSignature("blacklist(address)", ALICE),
+            abi.encodeWithSignature("setBlacklist(address,bool)", ALICE, true),
+            abi.encodeWithSignature("freeze(address)", ALICE),
+            abi.encodeWithSignature("seize(address)", ALICE),
+            abi.encodeWithSignature("upgradeTo(address)", BOB),
+            abi.encodeWithSignature("initialize(address)", BOB),
+            abi.encodeWithSignature("setMinter(address)", BOB),
+            abi.encodeWithSignature("setOwner(address)", BOB)
         ];
-        for (uint256 i; i < signatures.length; ++i) {
-            (bool deployerCan,) = address(token).call(abi.encodeWithSignature(signatures[i], ALICE, 500));
-            require(!deployerCan, "deployer has privilege");
-            vm.prank(BOB);
-            (bool strangerCan,) = address(token).call(abi.encodeWithSignature(signatures[i], BOB, 500));
-            require(!strangerCan, "unexpected public mutation");
+        address[5] memory callers = [address(this), ALICE, BOB, CREATOR, POOL];
+        for (uint256 i; i < calls.length; ++i) {
+            for (uint256 j; j < callers.length; ++j) {
+                vm.prank(callers[j]);
+                (bool ok,) = address(token).call(calls[i]);
+                require(!ok, "unexpected owner/admin/mint/burn function");
+            }
         }
         require(token.CREATOR_TAX_BPS() == 50 && token.CREATOR_WALLET() == CREATOR, "mutable fees");
+        require(token.BPS_DENOMINATOR() == 10_000 && token.POOL_MANAGER() == POOL, "mutable tax parameters");
         require(token.totalSupply() == SUPPLY && token.balanceOf(ALICE) == 10 ether, "privileged balance change");
         vm.prank(ALICE);
         token.transfer(BOB, 10 ether);
@@ -204,7 +216,6 @@ contract SUNTokenTest {
         require(code.length < 24_576, "runtime size");
     }
 
-    /// forge-config: default.fuzz.runs = 1000
     function testFuzz_StatefulSupplyConservation(bytes32 seed) public {
         address[6] memory actors = [address(this), ALICE, BOB, POOL, CREATOR, DISTRIBUTOR];
         for (uint256 i; i < 40; ++i) {

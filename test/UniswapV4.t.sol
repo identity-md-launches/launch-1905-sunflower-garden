@@ -3,6 +3,8 @@ pragma solidity 0.8.26;
 
 import {SUNToken} from "../src/SUNToken.sol";
 import {Vm} from "./SUNToken.t.sol";
+import {SUNEventVm} from "./SUNTokenEdges.t.sol";
+import {SUNV4Trader} from "./helpers/SUNV4Trader.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
@@ -124,6 +126,175 @@ abstract contract UniswapV4Test is IUnlockCallback {
         require(gross > 0, "no withdrawn liquidity");
         require(token.balanceOf(address(this)) - before == gross - gross / 200, "withdrawal tax");
         require(token.balanceOf(token.CREATOR_WALLET()) == gross / 200, "withdrawal recipient");
+    }
+
+    function testFuzz_IndependentTraderBuySellAndOptionalForwarding(uint256 raw, bool forwardOutput) public {
+        manager.unlock(abi.encode(uint8(0), int256(1e24)));
+        SUNV4Trader trader = new SUNV4Trader(manager, token);
+        address recipient = address(0xB0B11);
+        // Small relative to seeded liquidity, so this exact-input order must fill completely.
+        uint256 input = 1e12 + raw % (5 ether - 1e12 + 1);
+        PairForTest(PAIR).mint(address(trader), input);
+        uint256 poolBefore = token.balanceOf(POOL);
+        SUNEventVm eventVm = SUNEventVm(address(vm));
+        eventVm.recordLogs();
+        BalanceDelta buyDelta = trader.swap(_request(true, -int256(input), recipient, forwardOutput));
+        _assertSwapFee(eventVm.getRecordedLogs());
+        uint256 gross = uint256(int256(_sunDelta(buyDelta)));
+        uint256 net = gross - gross / 200;
+        require(gross >= 200, "buy did not exercise a nonzero tax");
+        require(_pairDelta(buyDelta) == -int256(input), "exact input was not filled");
+        require(token.balanceOf(recipient) == net, "recipient did not receive net SUN");
+        require(token.balanceOf(token.CREATOR_WALLET()) == gross / 200, "wrong creator payment or double tax");
+        require(token.balanceOf(POOL) == poolBefore - gross, "manager not debited gross output");
+        require(PairForTest(PAIR).balanceOf(POOL) == input, "IMD debt not settled in full");
+        require(token.balanceOf(address(trader)) == 0, "router retained SUN");
+        require(PairForTest(PAIR).balanceOf(address(trader)) == 0, "router retained IMD input");
+
+        vm.prank(recipient);
+        token.transfer(address(trader), net);
+        poolBefore = token.balanceOf(POOL);
+        BalanceDelta sellDelta = trader.swap(_request(false, -int256(net), recipient, forwardOutput));
+        require(_sunDelta(sellDelta) == -int256(net), "net buy amount could not be sold in full");
+        require(_pairDelta(sellDelta) > 0, "sell returned no IMD");
+        require(PairForTest(PAIR).balanceOf(recipient) == uint256(int256(_pairDelta(sellDelta))), "IMD output short");
+        require(token.balanceOf(POOL) == poolBefore + net, "sell arrived short at PoolManager");
+        require(token.balanceOf(token.CREATOR_WALLET()) == gross / 200, "sell or forwarding was taxed");
+        require(token.balanceOf(address(trader)) == 0 && token.balanceOf(recipient) == 0, "unsold SUN");
+        _assertSupplyAccountedFor(recipient, address(trader));
+    }
+
+    function test_ExactOutputBuyReportsGrossButDeliversNet() public {
+        manager.unlock(abi.encode(uint8(0), int256(1e24)));
+        SUNV4Trader trader = new SUNV4Trader(manager, token);
+        PairForTest(PAIR).mint(address(trader), 1 ether);
+        address recipient = address(0xB0B11);
+        uint256 gross = 10_000 ether + 199;
+        uint256 poolBefore = token.balanceOf(POOL);
+        BalanceDelta delta = trader.swap(_request(true, int256(gross), recipient, false));
+        require(_sunDelta(delta) == int256(gross), "exact gross output not delivered");
+        require(token.balanceOf(recipient) == gross - gross / 200, "wrong exact-output net amount");
+        require(token.balanceOf(token.CREATOR_WALLET()) == gross / 200, "exact-output fee");
+        require(token.balanceOf(POOL) == poolBefore - gross, "exact-output pool debit");
+        require(_pairDelta(delta) < 0, "no IMD charged");
+        require(PairForTest(PAIR).balanceOf(POOL) == uint256(-int256(_pairDelta(delta))), "exact-output debt short");
+        _assertSupplyAccountedFor(recipient, address(trader));
+    }
+
+    function test_NetOutputSlippageFailureRollsBackSwapAndCreatorFee() public {
+        manager.unlock(abi.encode(uint8(0), int256(1e24)));
+        SUNV4Trader trader = new SUNV4Trader(manager, token);
+        PairForTest(PAIR).mint(address(trader), 1 ether);
+        address recipient = address(0xB0B11);
+        uint256 gross = 10_000 ether;
+        uint256 poolBefore = token.balanceOf(POOL);
+        SUNV4Trader.Request memory request = _request(true, int256(gross), recipient, true);
+        request.minimumReceived = gross;
+        vm.expectRevert(abi.encodeWithSelector(SUNV4Trader.MinimumOutputNotMet.selector, gross - gross / 200, gross));
+        trader.swap(request);
+        require(token.balanceOf(POOL) == poolBefore, "failed swap removed pool SUN");
+        require(token.balanceOf(token.CREATOR_WALLET()) == 0, "failed swap paid creator");
+        require(token.balanceOf(recipient) == 0 && token.balanceOf(address(trader)) == 0, "failed swap paid buyer");
+        require(PairForTest(PAIR).balanceOf(POOL) == 0, "failed swap paid IMD");
+        require(PairForTest(PAIR).balanceOf(address(trader)) == 1 ether, "failed swap spent trader IMD");
+        // A correctly specified minimum succeeds immediately after the rejected transaction.
+        request.minimumReceived = gross - gross / 200;
+        trader.swap(request);
+        require(token.balanceOf(recipient) == request.minimumReceived, "valid minimum did not execute");
+    }
+
+    function test_UnderpaidSellRevertsAtomicallyThenFullyPaidSellSucceeds() public {
+        manager.unlock(abi.encode(uint8(0), int256(1e24)));
+        SUNV4Trader trader = new SUNV4Trader(manager, token);
+        PairForTest(PAIR).mint(address(trader), 1 ether);
+        address recipient = address(0xB0B11);
+        trader.swap(_request(true, -int256(1 ether), recipient, false));
+        uint256 net = token.balanceOf(recipient);
+        vm.prank(recipient);
+        token.transfer(address(trader), net);
+        uint256 poolBefore = token.balanceOf(POOL);
+        uint256 feeBefore = token.balanceOf(token.CREATOR_WALLET());
+        uint256 imdBefore = PairForTest(PAIR).balanceOf(POOL);
+        SUNV4Trader.Request memory request = _request(false, -int256(net), recipient, false);
+        request.underpaySun = true;
+        vm.expectRevert(abi.encodeWithSelector(IPoolManager.CurrencyNotSettled.selector));
+        trader.swap(request);
+        require(token.balanceOf(POOL) == poolBefore && token.balanceOf(address(trader)) == net, "failed sell moved SUN");
+        require(PairForTest(PAIR).balanceOf(POOL) == imdBefore, "failed sell debited pool IMD");
+        require(PairForTest(PAIR).balanceOf(recipient) == 0, "failed sell credited recipient IMD");
+        require(token.balanceOf(token.CREATOR_WALLET()) == feeBefore, "failed sell changed creator balance");
+        request.underpaySun = false;
+        trader.swap(request);
+        require(token.balanceOf(address(trader)) == 0 && token.balanceOf(POOL) == poolBefore + net, "full sell failed");
+        require(PairForTest(PAIR).balanceOf(recipient) > 0, "retry returned no IMD");
+        _assertSupplyAccountedFor(recipient, address(trader));
+    }
+
+    function test_AccruedLPFeesSettleWithTaxOnlyOnSunOutflow() public {
+        manager.unlock(abi.encode(uint8(0), int256(1e24)));
+        SUNV4Trader trader = new SUNV4Trader(manager, token);
+        PairForTest(PAIR).mint(address(trader), 1 ether);
+        address recipient = address(0xB0B11);
+        trader.swap(_request(true, -int256(1 ether), recipient, false));
+        uint256 net = token.balanceOf(recipient);
+        vm.prank(recipient);
+        token.transfer(address(trader), net);
+        trader.swap(_request(false, -int256(net), recipient, false));
+        uint256 sunBefore = token.balanceOf(address(this));
+        uint256 imdBefore = PairForTest(PAIR).balanceOf(address(this));
+        uint256 poolBefore = token.balanceOf(POOL);
+        uint256 feeBefore = token.balanceOf(token.CREATOR_WALLET());
+        // A zero liquidity change collects the fees accrued by the two swaps.
+        manager.unlock(abi.encode(uint8(0), int256(0)));
+        uint256 grossSunFees = poolBefore - token.balanceOf(POOL);
+        require(grossSunFees >= 200, "no SUN LP fees accrued");
+        require(PairForTest(PAIR).balanceOf(address(this)) > imdBefore, "no IMD LP fees accrued");
+        require(token.balanceOf(address(this)) - sunBefore == grossSunFees - grossSunFees / 200, "LP fee payout tax");
+        require(token.balanceOf(token.CREATOR_WALLET()) - feeBefore == grossSunFees / 200, "LP fee creator payment");
+        _assertSupplyAccountedFor(recipient, address(trader));
+    }
+
+    function test_StaticPoolFeeRejectsDynamicUpdates() public {
+        require(key.fee == 12500 && key.tickSpacing == 60, "launch pool parameters");
+        vm.expectRevert(abi.encodeWithSelector(IPoolManager.UnauthorizedDynamicLPFeeUpdate.selector));
+        manager.updateDynamicLPFee(key, 100);
+    }
+
+    function _request(bool buy, int256 amount, address recipient, bool forwardOutput)
+        private
+        view
+        returns (SUNV4Trader.Request memory)
+    {
+        bool sunFirst = address(token) < PAIR;
+        return SUNV4Trader.Request(key, buy ? !sunFirst : sunFirst, amount, recipient, forwardOutput, 0, false);
+    }
+
+    function _sunDelta(BalanceDelta delta) private view returns (int128) {
+        return address(token) < PAIR ? delta.amount0() : delta.amount1();
+    }
+
+    function _pairDelta(BalanceDelta delta) private view returns (int128) {
+        return address(token) < PAIR ? delta.amount1() : delta.amount0();
+    }
+
+    function _assertSupplyAccountedFor(address recipient, address trader) private view {
+        uint256 sum = token.balanceOf(address(this)) + token.balanceOf(SWARM) + token.balanceOf(POOL)
+            + token.balanceOf(token.CREATOR_WALLET()) + token.balanceOf(recipient) + token.balanceOf(trader);
+        require(sum == 1e27 && token.totalSupply() == 1e27, "integration supply conservation");
+        require(token.balanceOf(SWARM) == 100_000_000 ether, "trading touched swarm allocation");
+    }
+
+    function _assertSwapFee(SUNEventVm.Log[] memory logs) private pure {
+        bytes32 signature = keccak256("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
+        bool seen;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter == POOL && logs[i].topics.length > 0 && logs[i].topics[0] == signature) {
+                (,,,,, uint24 fee) = abi.decode(logs[i].data, (int128, int128, uint160, uint128, int24, uint24));
+                require(fee == 12500, "actual swap fee is not 1.25 percent");
+                seen = true;
+            }
+        }
+        require(seen, "PoolManager emitted no swap");
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
